@@ -1,0 +1,38 @@
+{
+  "app_name": "ZeroCast",
+  "package_name": "zerocast",
+  "bin_name": "zerocast",
+  "version": "0.1.0",
+  "description": "Live-stream the CardputerZero camera, mic or screen to Twitch, YouTube and Restreamer",
+  "store": {
+    "summary": "Stream camera, mic or screen to Twitch, YouTube and Restreamer at once",
+    "description": "ZeroCast turns the CardputerZero into a pocket live-streaming encoder. Stream the camera and microphone (the default), a USB webcam, or the built-in LCD or an HDMI desktop, with optional system audio, to Twitch, YouTube, a Restreamer instance or any RTMP server, several at once. Video is encoded by the hardware H.264 encoder, so it does not load the CPU. Stream keys can be typed on the keyboard or entered from a phone through an optional, password-protected setup page that you start on demand and that switches itself off after a few minutes.",
+    "categories": [
+      "Media",
+      "Creative & Office"
+    ],
+    "screenshots": [
+      "store/screenshots/live.png",
+      "store/screenshots/sources.png",
+      "store/screenshots/remote-setup.png",
+      "store/screenshots/settings.png"
+    ],
+    "icon": "assets/images/zerocast.png",
+    "license": "MIT",
+    "source_repo": "https://github.com/J0s3f/zerocast",
+    "author": {
+      "github": "J0s3f",
+      "display_name": "Josef H.B. Schneider"
+    },
+    "share_code": "ZCST",
+    "permissions": {
+      "camera": true,
+      "microphone": true,
+      "imu": false,
+      "network": true,
+      "additional_hardware": false,
+      "background_service": true,
+      "external_display": true
+    }
+  }
+}

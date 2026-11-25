@@ -1,0 +1,269 @@
+/*
+ * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include "app.h"
+
+#include "application_config.h"
+#include "asset_manager.h"
+#include "base_viewmodel.h"
+#include "linux_input.h"
+#include "logger.h"
+#include "stream_config.h"
+#include "theme.h"
+#include "zerocast_ui.h"
+
+#include <cstdlib>
+#include <filesystem>
+#include <memory>
+#include <string>
+
+#include <unistd.h>
+
+#if USE_DESKTOP
+#include "desktop_simulator_frame.h"
+#endif
+
+#if !USE_DESKTOP
+#if APP_USE_DRM
+#include "src/drivers/display/drm/lv_linux_drm.h"
+#else
+#include "src/drivers/display/fb/lv_linux_fbdev.h"
+#endif
+#endif
+
+#ifndef APP_FRAMEBUFFER_DEVICE
+#define APP_FRAMEBUFFER_DEVICE "/dev/fb0"
+#endif
+
+#ifndef APP_DRM_DEVICE
+#define APP_DRM_DEVICE "/dev/dri/card0"
+#endif
+
+#ifndef APP_DRM_CONNECTOR_ID
+#define APP_DRM_CONNECTOR_ID -1
+#endif
+
+#ifndef APP_CONFIG_FILE
+#define APP_CONFIG_FILE "zerocast.conf"
+#endif
+
+namespace app {
+namespace {
+
+void quit_requested_observer(lv_observer_t* observer, lv_subject_t* subject) {
+    auto* running = static_cast<bool*>(lv_observer_get_user_data(observer));
+    if (running && lv_subject_get_int(subject)) {
+        *running = false;
+    }
+}
+
+struct DarkModePersistence {
+    std::string config_path;
+    bool last_dark_mode;
+};
+
+std::string user_config_dir() {
+    if (const char* xdg_config_home = std::getenv("XDG_CONFIG_HOME")) {
+        const std::filesystem::path root(xdg_config_home);
+        if (!root.empty() && root.is_absolute()) {
+            return (root / "zerocast").string();
+        }
+    }
+    if (const char* home = std::getenv("HOME")) {
+        const std::filesystem::path root(home);
+        if (!root.empty() && root.is_absolute()) {
+            return (root / ".config" / "zerocast").string();
+        }
+    }
+    return "";
+}
+
+std::string writable_config_path() {
+#if USE_DESKTOP
+    return APP_CONFIG_FILE;
+#else
+    const std::string dir = user_config_dir();
+    return dir.empty() ? std::string(APP_CONFIG_FILE) : dir + "/zerocast.conf";
+#endif
+}
+
+// The stream configuration holds stream keys, so it is written with mode 0600. On the device
+// the launcher runs as root and /etc is the right home; otherwise use the user's config dir.
+std::string stream_config_path() {
+    if (const char* override_path = std::getenv("ZEROCAST_STREAM_CONFIG")) {
+        if (override_path[0] != '\0') {
+            return override_path;
+        }
+    }
+#if USE_DESKTOP
+    return "zerocast-stream.conf";
+#else
+    if (::access("/etc", W_OK) == 0) {
+        return "/etc/zerocast-stream.conf";
+    }
+    const std::string dir = user_config_dir();
+    if (!dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        return dir + "/stream.conf";
+    }
+    return "zerocast-stream.conf";
+#endif
+}
+
+void persist_dark_mode_observer(lv_observer_t* observer, lv_subject_t* subject) {
+    auto* persistence = static_cast<DarkModePersistence*>(lv_observer_get_user_data(observer));
+    if (!persistence) {
+        return;
+    }
+    const bool dark_mode = lv_subject_get_int(subject) != 0;
+    if (dark_mode == persistence->last_dark_mode) {
+        return;
+    }
+    persistence->last_dark_mode = dark_mode;
+
+    ApplicationConfig config;
+    config.dark_mode = dark_mode;
+    std::string error;
+    if (save_application_config(persistence->config_path, config, error)) {
+        LOG_INFO("saved config: {} (dark_mode={})",
+                 persistence->config_path,
+                 config.dark_mode ? "yes" : "no");
+    } else {
+        LOG_WARN("failed to save config {}: {}", persistence->config_path, error);
+    }
+}
+
+#if !USE_DESKTOP
+lv_display_t* init_device_display() {
+#if APP_USE_DRM
+    auto* display = lv_linux_drm_create();
+    if (!display) {
+        return nullptr;
+    }
+
+    if (lv_linux_drm_set_file(display, APP_DRM_DEVICE, APP_DRM_CONNECTOR_ID) != LV_RESULT_OK) {
+        lv_display_delete(display);
+        return nullptr;
+    }
+
+    platform::init_key_input(display);
+    return display;
+#else
+    auto* display = lv_linux_fbdev_create();
+    if (!display) {
+        return nullptr;
+    }
+
+    if (lv_linux_fbdev_set_file(display, APP_FRAMEBUFFER_DEVICE) != LV_RESULT_OK) {
+        lv_display_delete(display);
+        return nullptr;
+    }
+
+    platform::init_key_input(display);
+    return display;
+#endif
+}
+#endif
+
+} // namespace
+
+int Application::run() {
+    logger::Logger::init();
+    logger::Logger::set_tag("zerocast");
+
+    lv_init();
+
+    AssetManager assets;
+    for (const auto& root : assets.roots()) {
+        LOG_INFO("asset root: {}", root.string());
+    }
+
+    viewmodel::BaseViewModel view_model;
+    const std::string user_config_path = writable_config_path();
+    std::string loaded_config_path = APP_CONFIG_FILE;
+    if (user_config_path != APP_CONFIG_FILE) {
+        std::error_code filesystem_error;
+        if (std::filesystem::is_regular_file(user_config_path, filesystem_error)) {
+            loaded_config_path = user_config_path;
+        }
+    }
+
+    ApplicationConfig config;
+    std::string config_error;
+    if (load_application_config(loaded_config_path, config, config_error)) {
+        view_model.set_dark_mode(config.dark_mode);
+        LOG_INFO("loaded config: {} (dark_mode={})",
+                 loaded_config_path,
+                 config.dark_mode ? "yes" : "no");
+    } else {
+        LOG_WARN("failed to load config {}: {}; using defaults", loaded_config_path, config_error);
+    }
+
+    const std::string stream_path = stream_config_path();
+    stream::Config stream_config = stream::default_config();
+    if (stream::load_config(stream_path, &stream_config)) {
+        LOG_INFO("loaded stream config: {}", stream_path);  // never log its contents: it has keys
+    } else {
+        LOG_INFO("no stream config at {}; using defaults", stream_path);
+    }
+
+#if USE_DESKTOP
+    DesktopSimulatorFrame simulator_frame(assets);
+    auto* display = simulator_frame.display();
+#else
+    auto* display = init_device_display();
+#endif
+    if (!display) {
+        LOG_ERROR("failed to initialize display");
+        return 1;
+    }
+
+    auto* standard_font = assets.load_standard_font(14);
+    view::apply_lvgl_theme(display,
+                           view_model.is_dark_mode(),
+                           standard_font ? standard_font : LV_FONT_DEFAULT);
+
+#if USE_DESKTOP
+    simulator_frame.bind_dark_mode(view_model.dark_mode_subject());
+#endif
+
+    view::ZeroCastUi ui(view_model, assets, stream_config, stream_path);
+
+    DarkModePersistence dark_mode_persistence{user_config_path, view_model.is_dark_mode()};
+    auto* dark_mode_observer = lv_subject_add_observer(view_model.dark_mode_subject(),
+                                                        persist_dark_mode_observer,
+                                                        &dark_mode_persistence);
+
+    bool running = true;
+    auto* quit_observer = lv_subject_add_observer(view_model.quit_requested_subject(),
+                                                  quit_requested_observer,
+                                                  &running);
+
+    LOG_INFO("LVGL app started at {}x{}", lv_display_get_horizontal_resolution(display),
+             lv_display_get_vertical_resolution(display));
+    while (running
+#if USE_DESKTOP
+           && simulator_frame.process_events()
+#endif
+    ) {
+        lv_timer_handler();
+        // lv_delay_ms() busy-waits when no delay callback is set (it was using ~80% of a CPU core while
+        // idle, competing with the video encoder); sleep instead.
+        ::usleep(5000);
+    }
+
+    if (quit_observer) {
+        lv_observer_remove(quit_observer);
+    }
+    if (dark_mode_observer) {
+        lv_observer_remove(dark_mode_observer);
+    }
+
+    return 0;
+}
+
+} // namespace app

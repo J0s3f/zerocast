@@ -1,0 +1,18 @@
+# Build environment for ZeroCast: cross-compiles the arm64 .deb on an x86_64 host.
+#   docker build -t zerocast-build -f docker/Dockerfile.build .
+#   docker run --rm -v <project dir>:/src -w /src zerocast-build \
+#       cmake --workflow --preset cp0-cross-package
+# Debian 13 (trixie) matches the CardputerZero OS, so the cross gcc/libstdc++ match the SDK sysroot.
+FROM debian:trixie
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git curl ca-certificates pkg-config \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+        dpkg-dev fakeroot file python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# The CMake presets require CMake >= 3.31, newer than the distro package.
+RUN pip3 install --break-system-packages cmake ninja
+
+WORKDIR /src

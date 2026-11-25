@@ -1,0 +1,67 @@
+name: Build
+
+# Unit tests on every push and PR; the arm64 .deb is built in a container (Debian 13, matching the
+# CardputerZero OS). Pushing a tag like v0.1.0 also publishes the .deb as a GitHub Release asset,
+# which is the file submitted to the CardputerZero Application Store.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Streaming core unit tests (no hardware needed)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Isrc/stream tests/stream_test.cpp src/stream/stream_config.cpp src/stream/pipeline.cpp -o stream_test
+          ./stream_test
+          g++ -std=c++17 -Wall -Wextra -Isrc/stream tests/web_test.cpp src/stream/web_config.cpp src/stream/stream_config.cpp src/stream/pipeline.cpp -o web_test
+          ./web_test
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # attach the .deb to a release when a tag is pushed
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CardputerZero SDK sysroot is ~1.3 GB unpacked; the toolchain skips the download if it exists.
+      - name: Cache SDK sysroot
+        uses: actions/cache@v4
+        with:
+          path: .cache/sdk_bsp-src
+          key: sdk-sysroot-${{ hashFiles('cmake/toolchains/cp0-aarch64-linux-gnu.cmake') }}
+
+      - name: Build the build container
+        run: docker build -t zerocast-build -f docker/Dockerfile.build .
+
+      - name: Cross-compile and package (arm64 .deb)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src zerocast-build \
+            cmake --workflow --preset cp0-cross-package
+          ls -l dist/*.deb
+
+      - name: Check the package
+        run: |
+          docker run --rm -v "$PWD/dist":/d zerocast-build sh -c \
+            'for f in /d/*.deb; do dpkg-deb -f "$f" Package Version Architecture Maintainer Depends; dpkg-deb -c "$f" | grep -E "usr/bin/zerocast|\.desktop"; done'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zerocast-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Publish release asset (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.deb --title "ZeroCast ${GITHUB_REF_NAME#v}" --generate-notes
